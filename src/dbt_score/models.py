@@ -6,7 +6,7 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Literal, TypeAlias
+from typing import Any, Iterable, Literal, TypeAlias, Union
 
 from dbt_score.dbt_utils import dbt_ls
 
@@ -203,6 +203,8 @@ class Model(HasColumnsMixin):
     tags: list[str] = field(default_factory=list)
     tests: list[Test] = field(default_factory=list)
     depends_on: dict[str, list[str]] = field(default_factory=dict)
+    parents: list[Union["Model", "Source"]] = field(default_factory=list)
+    children: list["Model"] = field(default_factory=list)
     constraints: list[Constraint] = field(default_factory=list)
     _raw_values: dict[str, Any] = field(default_factory=dict)
     _raw_test_values: list[dict[str, Any]] = field(default_factory=list)
@@ -333,6 +335,7 @@ class Source(HasColumnsMixin):
     loader: str
     freshness: SourceFreshness
     patch_path: str | None = None
+    children: list[Model] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
     tests: list[Test] = field(default_factory=list)
     _raw_values: dict[str, Any] = field(default_factory=dict)
@@ -417,8 +420,10 @@ class ManifestLoader:
         self.models: list[Model] = []
         self.tests: dict[str, list[dict[str, Any]]] = defaultdict(list)
         self.sources: list[Source] = []
+        self._children: dict[str, list[str]] = defaultdict(list)
 
         self._reindex_tests()
+        self._index_children()
         self._load_models()
         self._load_sources()
 
@@ -428,11 +433,45 @@ class ManifestLoader:
         if (len(self.models) + len(self.sources)) == 0:
             logger.warning("Nothing to evaluate!")
 
+    def _index_children(self) -> None:
+        for node_id, node_values in self.raw_nodes.items():
+            if node_values.get("resource_type") == "model":
+                for parent in node_values.get("depends_on", {}).get("nodes", []):
+                    self._children[parent].append(node_id)
+
     def _load_models(self) -> None:
         """Load the models from the manifest."""
         for node_id, node_values in self.raw_nodes.items():
             if node_values.get("resource_type") == "model":
                 model = Model.from_node(node_values, self.tests.get(node_id, []))
+                for parent_id in model.depends_on.get("nodes", []):
+                    if (
+                        self.raw_nodes.get(parent_id, {}).get("resource_type")
+                        == "model"
+                    ):
+                        model.parents.append(
+                            Model.from_node(
+                                self.raw_nodes.get(parent_id, {}),
+                                self.tests.get(parent_id, []),
+                            )
+                        )
+                    elif (
+                        self.raw_sources.get(parent_id, {}).get("resource_type")
+                        == "source"
+                    ):
+                        model.parents.append(
+                            Source.from_node(
+                                self.raw_sources.get(parent_id, {}),
+                                self.tests.get(parent_id, []),
+                            )
+                        )
+                model.children = [
+                    Model.from_node(
+                        self.raw_nodes.get(child_node_id, {}),
+                        self.tests.get(child_node_id, []),
+                    )
+                    for child_node_id in self._children[node_id]
+                ]
                 self.models.append(model)
 
     def _load_sources(self) -> None:
@@ -440,6 +479,13 @@ class ManifestLoader:
         for source_id, source_values in self.raw_sources.items():
             if source_values.get("resource_type") == "source":
                 source = Source.from_node(source_values, self.tests.get(source_id, []))
+                source.children = [
+                    Model.from_node(
+                        self.raw_nodes.get(child_node_id, {}),
+                        self.tests.get(child_node_id, []),
+                    )
+                    for child_node_id in self._children[source_id]
+                ]
                 self.sources.append(source)
 
     def _reindex_tests(self) -> None:

@@ -1,5 +1,6 @@
 """Test models."""
 
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
 
@@ -31,6 +32,22 @@ def test_manifest_load(mock_read_text, raw_manifest):
             ]
         )
         assert loader.sources[0].tests[0].name == "source_test1"
+
+        # models in `parents` / `children` do not themselves have `parents`
+        # or `children` populated, so we need to compare against an instance
+        # with those removed
+        model_0 = deepcopy(loader.models[0])
+        model_1 = deepcopy(loader.models[1])
+        source_0 = deepcopy(loader.sources[0])
+        model_0.children = []
+        model_1.parents = []
+        source_0.children = []
+
+        assert loader.models[0].parents == []
+        assert loader.models[1].parents == [model_0, source_0]
+        assert loader.sources[0].children == [model_1]
+        assert loader.models[0].children == [model_1]
+        assert loader.models[1].children == []
 
 
 @patch("dbt_score.models.Path.read_text")
