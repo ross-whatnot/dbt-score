@@ -48,6 +48,18 @@ def test_manifest_load(mock_read_text, raw_manifest):
             loader.sources["source.package.my_source.table1"]
         ]
 
+        assert loader.exposures["exposure.package.exposure1"].parents == [
+            loader.models["model.package.model1"]
+        ]
+        assert loader.models["model.package.model1"].children == [
+            loader.snapshots["snapshot.package.snapshot1"],
+            loader.exposures["exposure.package.exposure1"],
+        ]
+        assert loader.sources["source.package.my_source.table1"].children == [
+            loader.models["model.package.model1"],
+            loader.snapshots["snapshot.package.snapshot2"],
+        ]
+
 
 @patch("dbt_score.models.Path.read_text")
 def test_manifest_select_models_simple(mock_read_text, raw_manifest):

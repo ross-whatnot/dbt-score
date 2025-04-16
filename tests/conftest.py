@@ -4,7 +4,16 @@ import json
 from pathlib import Path
 from typing import Any, Type
 
-from dbt_score import Model, Rule, RuleViolation, Severity, Snapshot, Source, rule
+from dbt_score import (
+    Exposure,
+    Model,
+    Rule,
+    RuleViolation,
+    Severity,
+    Snapshot,
+    Source,
+    rule,
+)
 from dbt_score.config import Config
 from dbt_score.models import ManifestLoader
 from dbt_score.rule_filter import RuleFilter, rule_filter
@@ -105,6 +114,21 @@ def snapshot1(raw_manifest) -> Snapshot:
 def snapshot2(raw_manifest) -> Snapshot:
     """Snapshot 2."""
     return Snapshot.from_node(raw_manifest["nodes"]["snapshot.package.snapshot2"], [])
+
+
+# Exposures
+
+
+@fixture
+def exposure1(raw_manifest) -> Exposure:
+    """Exposure 1."""
+    return Exposure.from_node(raw_manifest["nodes"]["exposure.package.exposure1"])
+
+
+@fixture
+def exposure2(raw_manifest) -> Exposure:
+    """Exposure 2."""
+    return Exposure.from_node(raw_manifest["nodes"]["exposure.package.exposure2"])
 
 
 # Multiple ways to create rules
@@ -406,6 +430,23 @@ def snapshot_rule_with_filter() -> Type[Rule]:
         return RuleViolation(message="I always fail.")
 
     return snapshot_rule_with_filter
+
+
+@fixture
+def exposure_rule_with_filter() -> Type[Rule]:
+    """An example rule that skips through a filter."""
+
+    @rule_filter
+    def skip_exposure1(exposure: Exposure) -> bool:
+        """Skips for exposure1, passes for exposure2."""
+        return exposure.name != "exposure1"
+
+    @rule(rule_filters={skip_exposure1()})
+    def exposure_rule_with_filter(exposure: Exposure) -> RuleViolation | None:
+        """Rule that always fails when not filtered."""
+        return RuleViolation(message="I always fail.")
+
+    return exposure_rule_with_filter
 
 
 @fixture

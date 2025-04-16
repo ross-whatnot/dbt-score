@@ -179,7 +179,9 @@ class Model(HasColumnsMixin):
         tags: The list of tags attached to the model.
         tests: The list of tests attached to the model.
         depends_on: Dictionary of models/sources/macros that the model depends on.
-        parents: The list of models, sources, and snapshot this model depends on.
+        parents: The list of models, sources, and snapshots this model depends on.
+        children: The list of models, snapshots, and exposures that depend
+            on this model.
         _raw_values: The raw values of the model (node) in the manifest.
         _raw_test_values: The raw test values of the model (node) in the manifest.
     """
@@ -206,6 +208,7 @@ class Model(HasColumnsMixin):
     depends_on: dict[str, list[str]] = field(default_factory=dict)
     constraints: list[Constraint] = field(default_factory=list)
     parents: list[Union["Model", "Source", "Snapshot"]] = field(default_factory=list)
+    children: list[Union["Model", "Snapshot", "Exposure"]] = field(default_factory=list)
     _raw_values: dict[str, Any] = field(default_factory=dict)
     _raw_test_values: list[dict[str, Any]] = field(default_factory=list)
 
@@ -314,6 +317,8 @@ class Source(HasColumnsMixin):
         patch_path: The yml path of the source definition.
         tags: The list of tags attached to the source table.
         tests: The list of tests attached to the source table.
+        children: The list of models, snapshots, and exposures that depend
+            on this source.
         _raw_values: The raw values of the source definition in the manifest.
         _raw_test_values: The raw test values of the source definition in the manifest.
     """
@@ -337,6 +342,7 @@ class Source(HasColumnsMixin):
     patch_path: str | None = None
     tags: list[str] = field(default_factory=list)
     tests: list[Test] = field(default_factory=list)
+    children: list[Union["Model", "Snapshot", "Exposure"]] = field(default_factory=list)
     _raw_values: dict[str, Any] = field(default_factory=dict)
     _raw_test_values: list[dict[str, Any]] = field(default_factory=list)
 
@@ -419,6 +425,8 @@ class Snapshot(HasColumnsMixin):
         strategy: The strategy of the snapshot.
         unique_key: The unique key of the snapshot.
         parents: The list of models, sources, and snapshot this snapshot depends on.
+        children: The list of models, snapshots, and exposures that depend
+            on this snapshot.
         _raw_values: The raw values of the snapshot (node) in the manifest.
         _raw_test_values: The raw test values of the snapshot (node) in the manifest.
     """
@@ -444,6 +452,7 @@ class Snapshot(HasColumnsMixin):
     strategy: str | None = None
     unique_key: list[str] | None = None
     parents: list[Union["Model", "Source", "Snapshot"]] = field(default_factory=list)
+    children: list[Union["Model", "Snapshot", "Exposure"]] = field(default_factory=list)
     _raw_values: dict[str, Any] = field(default_factory=dict)
     _raw_test_values: list[dict[str, Any]] = field(default_factory=list)
 
@@ -486,7 +495,68 @@ class Snapshot(HasColumnsMixin):
         return hash(self.unique_id)
 
 
-Evaluable: TypeAlias = Model | Source | Snapshot
+@dataclass
+class Exposure:
+    """Represents a dbt exposure.
+
+    Attributes:
+        unique_id: The unique id of the exposure (e.g. `exposure.package.exposure1`).
+        name: The name of the exposure.
+        description: The description of the exposure.
+        label: The label of the exposure.
+        url: The url of the exposure.
+        maturity: The maturity of the exposure.
+        original_file_path: The path to the exposure file
+            (e.g. `models/exposures/exposures.yml`).
+        type: The type of the exposure, e.g. `application`.
+        owner: The owner of the exposure.
+        config: The config of the exposure.
+        meta: The meta of the exposure.
+        depends_on: The depends_on of the exposure.
+        parents: The list of models, sources, and snapshot this exposure depends on.
+        _raw_values: The raw values of the exposure in the manifest.
+    """
+
+    unique_id: str
+    name: str
+    description: str
+    label: str
+    url: str
+    maturity: str
+    original_file_path: str
+    type: str
+    owner: str
+    config: dict[str, Any]
+    meta: dict[str, Any]
+    depends_on: dict[str, list[str]] = field(default_factory=dict)
+    parents: list[Union["Model", "Source", "Snapshot"]] = field(default_factory=list)
+    _raw_values: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_node(cls, node_values: dict[str, Any]) -> "Exposure":
+        """Create an exposure object from a node in the manifest."""
+        return cls(
+            unique_id=node_values["unique_id"],
+            name=node_values["name"],
+            description=node_values["description"],
+            label=node_values["label"],
+            url=node_values["url"],
+            maturity=node_values["maturity"],
+            original_file_path=node_values["original_file_path"],
+            type=node_values["type"],
+            owner=node_values["owner"],
+            config=node_values["config"],
+            meta=node_values["meta"],
+            depends_on=node_values["depends_on"],
+            _raw_values=node_values,
+        )
+
+    def __hash__(self) -> int:
+        """Compute a unique hash for an exposure."""
+        return hash(self.unique_id)
+
+
+Evaluable: TypeAlias = Model | Source | Snapshot | Exposure
 
 
 class ManifestLoader:
@@ -511,17 +581,25 @@ class ManifestLoader:
             for source_id, source_values in self.raw_manifest.get("sources", {}).items()
             if source_values["package_name"] == self.project_name
         }
+        self.raw_exposures = {
+            exposure_id: exposure_values
+            for exposure_id, exposure_values in self.raw_manifest.get(
+                "exposures", {}
+            ).items()
+            if exposure_values["package_name"] == self.project_name
+        }
 
         self.models: dict[str, Model] = {}
         self.tests: dict[str, list[dict[str, Any]]] = defaultdict(list)
         self.sources: dict[str, Source] = {}
         self.snapshots: dict[str, Snapshot] = {}
-
+        self.exposures: dict[str, Exposure] = {}
         self._reindex_tests()
         self._load_models()
         self._load_sources()
         self._load_snapshots()
-        self._populate_parents()
+        self._load_exposures()
+        self._populate_relatives()
 
         if select:
             self._filter_evaluables(select)
@@ -550,6 +628,13 @@ class ManifestLoader:
                 snapshot = Snapshot.from_node(node_values, self.tests.get(node_id, []))
                 self.snapshots[node_id] = snapshot
 
+    def _load_exposures(self) -> None:
+        """Load the exposures from the manifest."""
+        for node_id, node_values in self.raw_exposures.items():
+            if node_values.get("resource_type") == "exposure":
+                exposure = Exposure.from_node(node_values)
+                self.exposures[node_id] = exposure
+
     def _reindex_tests(self) -> None:
         """Index tests based on their associated evaluable."""
         for node_values in self.raw_nodes.values():
@@ -566,16 +651,28 @@ class ManifestLoader:
                 ):
                     self.tests[node_unique_id].append(node_values)
 
-    def _populate_parents(self) -> None:
-        """Populate `parents` for all models and snapshots."""
-        for node in list(self.models.values()) + list(self.snapshots.values()):
+    def _populate_relatives(self) -> None:
+        """Populate `parents` and `children` for all evaluables.
+
+        Models, snapshots, and exposures can have parents; sources definitionally do not
+        have parents. Those parents may be models, snapshots, or sources; exposures
+        definitionally cannot be parents.
+        """
+        for node in (
+            list(self.models.values())
+            + list(self.snapshots.values())
+            + list(self.exposures.values())
+        ):
             for parent_id in node.depends_on.get("nodes", []):
                 if parent_id in self.models:
                     node.parents.append(self.models[parent_id])
+                    self.models[parent_id].children.append(node)
                 elif parent_id in self.snapshots:
                     node.parents.append(self.snapshots[parent_id])
+                    self.snapshots[parent_id].children.append(node)
                 elif parent_id in self.sources:
                     node.parents.append(self.sources[parent_id])
+                    self.sources[parent_id].children.append(node)
 
     def _filter_evaluables(self, select: Iterable[str]) -> None:
         """Filter evaluables like dbt's --select."""
